@@ -42,8 +42,6 @@ func main() {
 	ConnectionSettings :=  ConnectionServerConfig{}
 
 	app := cli.NewApp()
-//jholder@telus.net
-//172.20.100.241
 
 	app.Action = func(ctx *cli.Context) error {
 		dir, err := os.Getwd()
