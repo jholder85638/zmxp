@@ -10,9 +10,13 @@ import (
 	"gopkg.in/ini.v1"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
+	//"github.com/asticode/go-astilectron"
 )
+
+const version  = "0.2a"
 
 type ConnectionServerConfig struct {
 	mailboxServers       string
@@ -31,9 +35,13 @@ type ConnectionServerConfig struct {
 }
 
 var log = logrus.New()
-var version = "0.1-Alpha"
 var inputFile = ""
 var serverStats = false
+var password = ""
+var module = ""
+var task = ""
+
+
 
 func init() {
 	flaggy.SetName("Zimbra Experience (zmxp)")
@@ -41,20 +49,29 @@ func init() {
 	flaggy.DefaultParser.ShowHelpOnUnexpected = true
 	flaggy.DefaultParser.AdditionalHelpPrepend = "http://github.com/zimbra/zmxp"
 	flaggy.String(&inputFile, "f", "file", "Provide an input file with a list of accounts to test (--file=myfile.txt). The file should consist of user email addresses, one per line.")
-
 	flaggy.Bool(&serverStats, "ss", "server-stats", "Gather server stats for success vs failure.")
+	flaggy.String(&password, "p", "password", "Manually define a password.")
+	flaggy.String(&module, "m", "module", "The module to use.")
+	flaggy.String(&task, "t", "task", "The task to to perform.")
 
-	flaggy.SetVersion(version)
+	flaggy.SetVersion("zmxp "+version)
 	flaggy.Parse()
 }
 
 func main() {
+	log.Info("ZMXP "+version+": starting up.")
+	if runtime.GOOS == "windows" {
+		fmt.Println("Hello from Windows")
+	}
+
 	var mode = "file"
 	var saveToConfig bool
+
 	ui := &input.UI{
 		Writer: os.Stdout,
 		Reader: os.Stdin,
 	}
+
 	ConnectionSettings := ConnectionServerConfig{}
 	ConnectionSettings.printedSSLSkipNotice = false
 	if inputFile !=""{
@@ -134,18 +151,24 @@ func main() {
 	}
 
 	ConnectionSettings.adminUsername = adminUsername
-	query := "Enter the password for " + adminUsername
-	pw, err := ui.Ask(query, &input.Options{
-		Default:   "",
-		Required:  true,
-		Loop:      true,
-		HideOrder: true,
-		Mask:      true,
-	})
-	if err != nil {
-		log.Fatal(err.Error())
+	if password==""{
+		query := "Enter the password for " + adminUsername
+		pw, err := ui.Ask(query, &input.Options{
+			Default:   "",
+			Required:  true,
+			Loop:      true,
+			HideOrder: true,
+			Mask:      true,
+		})
+		if err != nil {
+			log.Fatal(err.Error())
+		}
+		ConnectionSettings.adminPassword = pw
+	}else{
+		log.Warn("Password has been set via the command line... (This is NOT recommended.)")
+		ConnectionSettings.adminPassword = password
 	}
-	ConnectionSettings.adminPassword = pw
+
 
 	AuthMailboxServer := cfg.Section("ZCS Admin Settings").Key("AuthMailboxServer").String()
 	if AuthMailboxServer == "" {
@@ -322,6 +345,7 @@ func main() {
 			if len(valid)>1{
 				accountsPlurality = "accounts"
 			}
+
 			summary := "There are "+valid+" "+accountsPlurality+" to test over "+domains+" "+domainPlurality+". "
 			summary += "Skipping "+invalid+" "+linePlurality+" (invalid email "+skipPlurality+"). Use --debug=true to see details."
 
@@ -333,6 +357,7 @@ func main() {
 		}
 
 		for _,v := range accountsToTest{
+			log.Info("Checking Account: "+v)
 			takeScreenshot(ConnectionSettings, v)
 		}
 		break

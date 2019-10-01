@@ -11,32 +11,48 @@ import (
 )
 
 func takeScreenshot(ConnectionSettings ConnectionServerConfig, v string){
+
 	ConnectionSettings.adminAuthToken = getLoginToken("admin", ConnectionSettings)
 	delegateToken := delegateAuthRequest(ConnectionSettings, v)
-
-	zimbraMailHost := strings.Split(GetInfoRequest(ConnectionSettings, v, "host"), "home/")[0]
-
+	infoRequest := GetInfoRequest(ConnectionSettings, v, "host")
+	zimbraMailHost := strings.Split(infoRequest, "home/")[0]
 	ctx := context.Background()
-	options := []chromedp.ExecAllocatorOption{
-		chromedp.ProxyServer("socks5://"+ConnectionSettings.socksServerString),
-	}
-	options = append(options, chromedp.DefaultExecAllocatorOptions[:]...)
 
-	c, cc := chromedp.NewExecAllocator(ctx, options...)
-	defer cc()
-	// create context
-	ctx, cancel := chromedp.NewContext(c)
-	defer cancel()
-	//var res string
-	var buf []byte
-
-	if err := chromedp.Run(ctx, fullScreenshot(zimbraMailHost+"/mail?adminPreAuth=1", 90, "ZM_AUTH_TOKEN", delegateToken, v, &buf)); err != nil {
-		log.Fatal(err)
-	}
-	if err := ioutil.WriteFile(v+".png", buf, 0644); err != nil {
-		log.Fatal(err)
+	if ConnectionSettings.useSocks5Proxy ==true{
+		options := []chromedp.ExecAllocatorOption{
+			chromedp.ProxyServer("socks5://"+ConnectionSettings.socksServerString),
+		}
+		options = append(options, chromedp.DefaultExecAllocatorOptions[:]...)
+		c, cc := chromedp.NewExecAllocator(ctx, options...)
+		defer cc()
+		ctx, cancel := chromedp.NewContext(c)
+		defer cancel()
+		var buf []byte
+		if err := chromedp.Run(ctx, fullScreenshot(zimbraMailHost+"/mail?adminPreAuth=1", 90, "ZM_AUTH_TOKEN", delegateToken, v, &buf)); err != nil {
+			log.Fatal(err)
+		}
+		if err := ioutil.WriteFile(v+".png", buf, 0644); err != nil {
+			log.Fatal(err)
+		}else{
+			log.Info("Saving screenshot for: "+v+ " to file "+v+".png")
+		}
 	}else{
-		log.Info("Saving screenshot for: "+v+ " to file "+v+".png")
+		var options []chromedp.ExecAllocatorOption
+		options = append(options, chromedp.DefaultExecAllocatorOptions[:]...)
+		c, cc := chromedp.NewExecAllocator(ctx, options...)
+		defer cc()
+		ctx, cancel := chromedp.NewContext(c)
+		defer cancel()
+		var buf []byte
+
+		if err := chromedp.Run(ctx, fullScreenshot(zimbraMailHost+"/mail?adminPreAuth=1", 90, "ZM_AUTH_TOKEN", delegateToken, v, &buf)); err != nil {
+			log.Fatal(err)
+		}
+		if err := ioutil.WriteFile(v+".png", buf, 0644); err != nil {
+			log.Fatal(err)
+		}else{
+			log.Info("Saving screenshot for: "+v+ " to file "+v+".png")
+		}
 	}
 }
 
@@ -60,7 +76,6 @@ func fullScreenshot(urlstr string, quality int64, cookieName string, cookieValue
 		}),
 		chromedp.Navigate(urlstr),
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			log.Info("Taking screenshot for user: "+email+" on host: "+cookieDomain)
 			_, _, contentSize, err := page.GetLayoutMetrics().Do(ctx)
 			if err != nil {
 				return err

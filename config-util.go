@@ -48,11 +48,23 @@ SkipSSLChecks=true
 #       Random :: The screenshot filename will be a random set of characters
 ScreenshotFilename=EmailAddress
 
-# ScreenshotQuality = (percentage) JPEG percentage quality
+# ScreenshotQuality = (int) JPEG percentage quality
 ScreenshotQuality=90
 
 # ServerStats = (true/false) Gather server stats for success/failure
 ServerStats = false
+
+# UpdateURL = (string) The URL to check for updates/kill
+UpdateURL= 
+
+# EnableKillSwitch = (bool) The purpose of the kill switch is to prevent versions which contain destructive bugs from running.
+EnableKillSwitch=true
+
+# EnableRunAsRoot = (bool)
+EnableRunAsRoot=false
+
+# EnableRunAsZimbra = (bool)
+EnableRunAsZimbra=false
 `
 	f, err := os.OpenFile("zmxp.ini", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
