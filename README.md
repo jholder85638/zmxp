@@ -1,4 +1,4 @@
-# zmxp v.02 - 9/26/2019
+# zmxp v.02a - 10/1/2019
 
 zmxp is an open source Zimbra experience testing utility.
 
