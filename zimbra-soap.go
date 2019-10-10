@@ -11,6 +11,28 @@ import (
 	"strings"
 )
 
+
+func SearchDateRequest(config ConnectionServerConfig, accountEmail string, dateBefore string, offset string)string{
+	//10/10/19
+	//<session id="158423761"/>
+	//<sessionId id="158423761"/>
+	body :=`<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Header>
+    <context xmlns="urn:zimbra">
+    <authToken>` + config.adminAuthToken + `</authToken>
+    <account by="name">` + accountEmail + `</account>
+	   <userAgent name="zmxp"  version="`+version+`"/>
+    </context>
+  </soap:Header>
+  <soap:Body>
+    <SearchRequest types="conversation" limit="1000" offset="`+offset+`" sortBy="dateDesc" xmlns="urn:zimbraMail">
+      <query>before:`+dateBefore+`</query>
+    </SearchRequest>
+  </soap:Body>
+</soap:Envelope>`
+	return sendSoapRequest(config, "SearchRequest", body)
+}
+
 func delegateAuthRequest(config ConnectionServerConfig, accountEmail string) string {
 
 	body := `<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
