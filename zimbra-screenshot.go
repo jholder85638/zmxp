@@ -17,10 +17,7 @@ func takeScreenshot(ConnectionSettings ConnectionServerConfig, v string){
 	delegateToken := delegateAuthRequest(ConnectionSettings, v)
 	infoRequest := GetInfoRequest(ConnectionSettings, v, "host")
 	zimbraMailHost := strings.Split(infoRequest, "home/")[0]
-	//userServerMapping[v] = zimbraMailHost
 	ctx := context.Background()
-	//startTime := time.Now()
-	//var endTime time.Time
 	if ConnectionSettings.useSocks5Proxy ==true{
 		options := []chromedp.ExecAllocatorOption{
 			chromedp.ProxyServer("socks5://"+ConnectionSettings.socksServerString),
@@ -31,15 +28,11 @@ func takeScreenshot(ConnectionSettings ConnectionServerConfig, v string){
 		ctx, cancel := chromedp.NewContext(c)
 		defer cancel()
 		var buf []byte
-		//connected := false
 		if err := chromedp.Run(ctx, fullScreenshot(zimbraMailHost+"/mail?adminPreAuth=1", 90, "ZM_AUTH_TOKEN", delegateToken, v, &buf)); err != nil {
 			cancel()
 			cc()
 			return
-			//log.Fatal(err)
 		}
-		//endTime = time.Now()
-
 		if err := ioutil.WriteFile(v+".png", buf, 0644); err != nil {
 			for {
 				if err = ioutil.WriteFile(v+".png", buf, 0644); err != nil {
@@ -72,8 +65,6 @@ func takeScreenshot(ConnectionSettings ConnectionServerConfig, v string){
 			log.Info("Saving screenshot for: "+v+ " to file "+v+".png")
 		}
 	}
-
-	//timeTaken := strings.Replace(endTime.Sub(startTime).String(), "s", "", -1)
 	host := strings.Split(zimbraMailHost, ":")[1]
 	host = strings.Replace(host, "//","",-1)
 	log.Info("Setting "+host+": "+v)

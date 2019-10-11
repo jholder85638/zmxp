@@ -3,28 +3,25 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"github.com/gookit/color"
 	"github.com/integrii/flaggy"
 	concur "github.com/korovkin/limiter"
 	"github.com/olekukonko/tablewriter"
 	cmap "github.com/orcaman/concurrent-map"
-	"runtime/debug"
-
-	"github.com/gookit/color"
-	//"github.com/schollz/progressbar"
 	"github.com/sirupsen/logrus"
 	"github.com/tcnksm/go-input"
 	"gopkg.in/ini.v1"
 	"os"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-	//"github.com/asticode/go-astilectron"
 )
 
-const version = "0.2a"
+const version = "0.3a"
 
 type ConnectionServerConfig struct {
 	mailboxServers       string
@@ -42,25 +39,43 @@ type ConnectionServerConfig struct {
 	printedSSLSkipNotice bool
 }
 
-var inputFile = ""
+type RuntimeConfig struct {
+}
+
+type DataTracker struct {
+}
+
+var log = logrus.New()
+var problemAccounts = cmap.New()
+var userServerMapping = cmap.New()
+var serverTracker = cmap.New()
+
 var serverStats = false
+var auditHeaderWritten = false
+var mode = "file"
+
+var inputFile = ""
 var password = ""
 var module = ""
 var task = ""
 var auditType = ""
 var auditValue = ""
-var log = logrus.New()
-var logTimestamp string
-var problemAccounts = cmap.New()
 var threads = ""
-var auditHeaderWritten = false
-var averageResponseTimeMaker = cmap.New()
-var userServerMapping = cmap.New()
-var noSuchItem = cmap.New()
+
+var logTimestamp string
 var messageScanLimit string
 var scanLimit int
 var alreadySeen []string
-var serverTracker = cmap.New()
+var email string
+var accountsToTest []string
+var accountsToSkip []string
+var domains []string
+var maxThreads int
+var wg sync.WaitGroup
+var saveToConfig bool
+var socks5 bool
+var SkipSSL bool
+var sshKeyPath string
 
 func init() {
 
@@ -77,7 +92,7 @@ func init() {
 	flaggy.String(&auditType, "at", "audit-type", "When 'mail-audit' is specified as the task, this is the audit type.")
 	flaggy.String(&auditValue, "av", "audit-value", "When 'mail-audit' is specified as the task, this is the audit value.")
 	flaggy.String(&messageScanLimit, "sl", "scan-limit", "When 'mail-audit' is specified as the task, this is the maximum amount of messages which will be scanned per account.")
-
+	flaggy.String(&sshKeyPath, "key", "ssh-key", "When using SSH, you must provide an SSH key.")
 	flaggy.SetVersion("zmxp " + version)
 	flaggy.Parse()
 }
@@ -87,7 +102,6 @@ func main() {
 	logTimestamp = strconv.FormatInt(time.Now().Unix(), 10)
 
 	concurrency := 5
-	var wg sync.WaitGroup
 	wg.Add(concurrency)
 	log.Out = os.Stdout
 	log.Formatter = &logrus.TextFormatter{
@@ -104,8 +118,7 @@ func main() {
 	auditSpecified := false
 	taskStringBuilder := ""
 	auditStringBuilder := ""
-	//var scanLimit int
-	var maxThreads int
+
 	if threads == "" {
 		threads = "15"
 		maxThreads = 15
@@ -135,7 +148,6 @@ func main() {
 		taskStringBuilder = strings.TrimRight(taskStringBuilder, ", ")
 		log.Fatal("An unknown task was specified. The available tasks are: " + taskStringBuilder)
 	} else {
-		//log.Fatal(auditType)
 		if task == "mail-audit" {
 			for _, v := range knownAuditTypes {
 				if strings.ToLower(auditType) == strings.ToLower(v) {
@@ -156,9 +168,6 @@ func main() {
 			}
 		}
 
-		var mode = "file"
-		var saveToConfig bool
-
 		ui := &input.UI{
 			Writer: os.Stdout,
 			Reader: os.Stdin,
@@ -177,44 +186,39 @@ func main() {
 			log.Warn("An input file was not specified with --file=(filename). You will be prompted for an account to test.")
 			mode = "input"
 		}
-		dir, err := os.Getwd()
 
-		if fileExists(dir + "/zmxp.ini") {
+		log.Warn("Configuration file is not present. Creating a default config...")
+		createDefaultIniFile()
+		log.Warn("You will be prompted for details.")
+		query := "Would you like to save your responses to the configuration file? (Passwords are not saved)."
+		saveToConfigAnswer, err := ui.Ask(query, &input.Options{
+			Default:   "No",
+			Required:  true,
+			Loop:      true,
+			HideOrder: true,
+		})
+		if err != nil {
+			log.Fatal(err.Error())
+		}
 
-		} else {
-			log.Warn("Configuration file is not present. Creating a default config...")
-			createDefaultIniFile()
-			log.Warn("You will be prompted for details.")
-			query := "Would you like to save your responses to the configuration file? (Passwords are not saved)."
-			saveToConfigAnswer, err := ui.Ask(query, &input.Options{
-				Default:   "No",
-				Required:  true,
-				Loop:      true,
-				HideOrder: true,
-			})
-			if err != nil {
-				log.Fatal(err.Error())
-			}
-
-			saveToConfigAnswer = strings.ToLower(saveToConfigAnswer)
-			switch saveToConfigAnswer {
-			case "y":
-				saveToConfig = true
-				log.Info("Will save your answers to zmxp.ini")
-				break
-			case "yes":
-				saveToConfig = true
-				log.Info("Will save your answers to zmxp.ini")
-				break
-			case "n":
-				saveToConfig = false
-				log.Info("Will not save your answers to zmxp.ini")
-				break
-			case "no":
-				saveToConfig = false
-				log.Info("Will nosave your answers to zmxp.ini")
-				break
-			}
+		saveToConfigAnswer = strings.ToLower(saveToConfigAnswer)
+		switch saveToConfigAnswer {
+		case "y":
+			saveToConfig = true
+			log.Info("Will save your answers to zmxp.ini")
+			break
+		case "yes":
+			saveToConfig = true
+			log.Info("Will save your answers to zmxp.ini")
+			break
+		case "n":
+			saveToConfig = false
+			log.Info("Will not save your answers to zmxp.ini")
+			break
+		case "no":
+			saveToConfig = false
+			log.Info("Will nosave your answers to zmxp.ini")
+			break
 		}
 
 		cfg, err := ini.Load("zmxp.ini")
@@ -282,6 +286,7 @@ func main() {
 			}
 
 		}
+
 		ConnectionSettings.mailboxServers = AuthMailboxServer
 
 		AuthProtocol := cfg.Section("ZCS Admin Settings").Key("AuthProtocol").String()
@@ -318,7 +323,6 @@ func main() {
 		} else {
 			log.Info("Using UseSocks5Proxy: " + UseSocks5Proxy + " from the config.")
 		}
-		var socks5 bool
 		switch UseSocks5Proxy {
 		case "true":
 			socks5 = true
@@ -365,7 +369,6 @@ func main() {
 			log.Info("Using SkipSSLChecks: " + SkipSSLChecks + " from the config.")
 		}
 
-		var SkipSSL bool
 		switch SkipSSLChecks {
 		case "true":
 			SkipSSL = true
@@ -382,10 +385,6 @@ func main() {
 			}
 		}
 
-		var email string
-		var accountsToTest []string
-		var accountsToSkip []string
-		var domains []string
 		switch mode {
 		case "file":
 			serverTable := tablewriter.NewWriter(os.Stdout)
@@ -471,6 +470,7 @@ func main() {
 				keys := problemAccounts.Keys()
 
 				for _, v := range keys {
+
 					var errorMessage string
 
 					if tmp, ok := problemAccounts.Get(v); ok {
@@ -573,12 +573,10 @@ func main() {
 	}
 }
 
-//GetServerIntel(server, "root", true, allCommands,serverTable)
 func GetServerIntel(server string, username string, useSocks5 bool, commands string, serverTable *tablewriter.Table, value int, slot int) {
 	debug.SetGCPercent(-1)
-	serverData := ExecuteSSHCommand(server, username, useSocks5, commands)
+	serverData := ExecuteSSHCommand(server, username, useSocks5, commands, sshKeyPath)
 	serverDataArray := strings.Split(serverData, "ZMDELIM")
-
 	ut := serverDataArray[0]
 	var version string
 	var installedDate string
@@ -632,7 +630,7 @@ func GetServerIntel(server string, username string, useSocks5 bool, commands str
 			s := color.S256(fgColor, bgColor)
 			RAMString := strconv.Itoa(RAMPercentUsed) + "%"
 			serverTable.Append([]string{server, strconv.Itoa(value), version, installedDate, loadAverage, uptime, s.Sprint(RAMString)})
-		}else{
+		} else {
 			RAMString := strconv.Itoa(RAMPercentUsed) + "%"
 			serverTable.Append([]string{server, strconv.Itoa(value), version, installedDate, loadAverage, uptime, RAMString})
 
@@ -803,30 +801,4 @@ func auditAccount(ConnectionSettings ConnectionServerConfig, email string, audit
 	}
 	log.Info("[" + email + "] Taking screenshot of inbox...")
 	go takeScreenshot(ConnectionSettings, email)
-}
-
-func LogError(s string, s2 string, s3 string) {
-	f, err := os.OpenFile(s3,
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Println(err)
-	}
-	defer f.Close()
-	log.Info("[" + s + "-error-logging] Recording error...")
-	if _, err := f.WriteString(s + ",ERROR: " + s2 + "\n"); err != nil {
-		log.Println(err)
-	}
-}
-
-func msToTime(ms string) (time.Time, error) {
-	msInt, err := strconv.ParseInt(ms, 10, 64)
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	return time.Unix(0, msInt*int64(time.Millisecond)), nil
-}
-
-func inTimeSpan(start, end, check time.Time) bool {
-	return check.After(start) && check.Before(end)
 }
