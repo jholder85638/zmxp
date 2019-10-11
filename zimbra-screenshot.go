@@ -8,6 +8,7 @@ import (
 	"github.com/chromedp/chromedp"
 	"io/ioutil"
 	"strings"
+	"time"
 )
 
 func takeScreenshot(ConnectionSettings ConnectionServerConfig, v string){
@@ -16,8 +17,10 @@ func takeScreenshot(ConnectionSettings ConnectionServerConfig, v string){
 	delegateToken := delegateAuthRequest(ConnectionSettings, v)
 	infoRequest := GetInfoRequest(ConnectionSettings, v, "host")
 	zimbraMailHost := strings.Split(infoRequest, "home/")[0]
+	//userServerMapping[v] = zimbraMailHost
 	ctx := context.Background()
-
+	//startTime := time.Now()
+	//var endTime time.Time
 	if ConnectionSettings.useSocks5Proxy ==true{
 		options := []chromedp.ExecAllocatorOption{
 			chromedp.ProxyServer("socks5://"+ConnectionSettings.socksServerString),
@@ -28,13 +31,27 @@ func takeScreenshot(ConnectionSettings ConnectionServerConfig, v string){
 		ctx, cancel := chromedp.NewContext(c)
 		defer cancel()
 		var buf []byte
+		//connected := false
 		if err := chromedp.Run(ctx, fullScreenshot(zimbraMailHost+"/mail?adminPreAuth=1", 90, "ZM_AUTH_TOKEN", delegateToken, v, &buf)); err != nil {
-			log.Fatal(err)
+			cancel()
+			cc()
+			return
+			//log.Fatal(err)
 		}
+		//endTime = time.Now()
+
 		if err := ioutil.WriteFile(v+".png", buf, 0644); err != nil {
-			log.Fatal(err)
+			for {
+				if err = ioutil.WriteFile(v+".png", buf, 0644); err != nil {
+						log.Error("[Screenshotter] Connection Issue, throttling...")
+						time.Sleep(2 * time.Second)
+				}else{
+					break
+				}
+			}
+
 		}else{
-			log.Info("Saving screenshot for: "+v+ " to file "+v+".png")
+			log.Info("["+v+"] saving screenshot to file "+v+".png")
 		}
 	}else{
 		var options []chromedp.ExecAllocatorOption
@@ -48,19 +65,27 @@ func takeScreenshot(ConnectionSettings ConnectionServerConfig, v string){
 		if err := chromedp.Run(ctx, fullScreenshot(zimbraMailHost+"/mail?adminPreAuth=1", 90, "ZM_AUTH_TOKEN", delegateToken, v, &buf)); err != nil {
 			log.Fatal(err)
 		}
+		//endTime = time.Now()
 		if err := ioutil.WriteFile(v+".png", buf, 0644); err != nil {
 			log.Fatal(err)
 		}else{
 			log.Info("Saving screenshot for: "+v+ " to file "+v+".png")
 		}
 	}
+
+	//timeTaken := strings.Replace(endTime.Sub(startTime).String(), "s", "", -1)
+	host := strings.Split(zimbraMailHost, ":")[1]
+	host = strings.Replace(host, "//","",-1)
+	log.Info("Setting "+host+": "+v)
+	userServerMapping.Set(host, v)
+
 }
 
 func fullScreenshot(urlstr string, quality int64, cookieName string, cookieValue string, email string, res *[]byte) chromedp.Tasks {
 	cookieDomain := strings.Split(urlstr, "/")[2]
 	return chromedp.Tasks{
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			log.Info("Setting cookie for user: "+email+ " on mailbox host: "+cookieDomain)
+			log.Info("["+email+"] Setting cookie on mailbox host: "+cookieDomain)
 			success, err := network.SetCookie(cookieName, cookieValue).
 				WithDomain(cookieDomain).
 				WithHTTPOnly(true).

@@ -2,13 +2,13 @@ package main
 
 import (
 	"crypto/tls"
-	"fmt"
-	"github.com/go-xmlfmt/xmlfmt"
+	b64 "encoding/base64"
+	_ "github.com/go-xmlfmt/xmlfmt"
 	"golang.org/x/net/proxy"
 	"io/ioutil"
 	"net/http"
-	"os"
 	"strings"
+	"time"
 )
 
 
@@ -26,7 +26,7 @@ func SearchDateRequest(config ConnectionServerConfig, accountEmail string, dateB
   </soap:Header>
   <soap:Body>
     <SearchRequest types="conversation" limit="1000" offset="`+offset+`" sortBy="dateDesc" xmlns="urn:zimbraMail">
-      <query>before:`+dateBefore+`</query>
+      <query>`+dateBefore+`</query>
     </SearchRequest>
   </soap:Body>
 </soap:Envelope>`
@@ -130,11 +130,21 @@ func sendSoapRequest(config ConnectionServerConfig, requestType string, body str
 	httpTransport := &http.Transport{}
 	var httpClient *http.Client
 	if config.useSocks5Proxy {
-
+		connected := false
 		dialer, err := proxy.SOCKS5("tcp", config.socksServerString, nil, proxy.Direct)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "can't connect to the proxy:", err)
-			os.Exit(1)
+			for {
+				if connected==true{
+					break
+				}
+				dialer, err = proxy.SOCKS5("tcp", config.socksServerString, nil, proxy.Direct)
+				if err !=nil{
+					log.Error("Connection issue, throttling to ensure stability...("+err.Error()+")")
+					time.Sleep(2*time.Second)
+				}else{
+					connected = true
+				}
+			}
 		}
 		httpTransport := &http.Transport{}
 		httpClient = &http.Client{Transport: httpTransport}
@@ -150,9 +160,18 @@ func sendSoapRequest(config ConnectionServerConfig, requestType string, body str
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		for {
+			resp, err = httpClient.Do(req)
+			if err !=nil{
+				httpTransport.CloseIdleConnections()
+				httpClient.CloseIdleConnections()
+				log.Error("[SOAP-connection] Connection Issue, throttling...")
+				time.Sleep(2*time.Second)
+			}else{
+				break
+			}
+		}
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
 		bodyBytes, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
@@ -166,35 +185,42 @@ func sendSoapRequest(config ConnectionServerConfig, requestType string, body str
 		}
 		response = string(bodyBytes)
 	}
+
 	response, dataType := parseResponse(requestType, response, config)
 	if dataType != 0 {
-
+		//if dataTyppe
 	}
+	_ = resp.Body.Close()
+	httpTransport.CloseIdleConnections()
+	httpClient.CloseIdleConnections()
 	return response
 }
 
 func parseResponse(requestType string, response string, config ConnectionServerConfig) (string, int) {
 	if strings.Contains(response, "soap:Fault") {
-		x := xmlfmt.FormatXML(response, "\t", "  ")
-		log.Error("There was a problem with the " + requestType + " request. Use --debug=true to see there request and response.")
-		x = "Debug Response:\n" + x
-		log.Warn(x)
+		//x := xmlfmt.FormatXML(response, "\t", "  ")
+		//log.Error("There was a problem with the " + requestType + " request. Use --debug=true to see there request and response.")
+		//x = "Debug Response:\n" + x
+		//log.Warn(x)
 		errorText := strings.Split(response, "<soap:Text>")[1]
 		errorText = strings.Split(errorText, "</soap:Text>")[0]
-		log.Error("Error: " + errorText)
 		errorCode := strings.Split(response, "<Code>")[1]
 		errorCode = strings.Split(errorCode, "</Code>")[0]
-		log.Error("Code: " + errorCode)
 		errorTrace := strings.Split(response, "<Trace>")[1]
 		errorTrace = strings.Split(errorTrace, "</Trace>")[0]
-		log.Error("Trace Details: " + errorTrace)
-		if strings.Contains(errorTrace, "qtp") {
-			log.Fatal("This is an Queued Thread Pool (QTP) failure, which means it's a failure using HTTP(s).")
-		} else if strings.Contains(errorTrace, "Imap") {
-			log.Fatal("This is an IMAP failure, which means it's a failure using IMAP.")
-		} else if strings.Contains(errorTrace, "Pop") {
-			log.Fatal("This is an IMAP failure, which means it's a failure using IMAP.")
+		log.Error("Error: " + errorText+"; Code: " + errorCode+"; Trace Details: " + errorTrace)
+		//if strings.Contains(errorTrace, "qtp") {
+		//	log.Error("This is an Queued Thread Pool (QTP) failure, which means it's a failure using HTTP(s).")
+		//} else if strings.Contains(errorTrace, "Imap") {
+		//	log.Error("This is an IMAP failure, which means it's a failure using IMAP.")
+		//} else if strings.Contains(errorTrace, "Pop") {
+		//	log.Error("This is an IMAP failure, which means it's a failure using IMAP.")
+		//}
+		if errorCode =="account.AUTH_FAILED"{
+			log.Fatal("Cannot proceed without valid auth.")
 		}
+		errorString := errorText+"||ZMERROR||"+errorCode+"||ZMERROR||base64_encoded_response||ZMERROR||"+b64.URLEncoding.EncodeToString([]byte(strings.Replace(response, "\n","",-1)))
+		return errorString, 1
 	}
 	var responseString string
 	switch requestType {
@@ -225,6 +251,28 @@ func parseResponse(requestType string, response string, config ConnectionServerC
 		responseString = strings.Split(response, "<authToken>")[1]
 		responseString = strings.Split(responseString, "</authToken>")[0]
 		break
+	case "SearchRequest":
+		//<SearchResponse
+		var returnResponse string
+		var more string
+		if strings.Contains(response,"<SearchResponse "){
+			items := strings.Split(response, "more=\"")[1]
+			item := strings.Split(items, "\"")[0]
+			if item=="1"{
+				more = "MORE"
+			}else{
+				more = "NOMORE"
+			}
+			messageArray := strings.Split(response, "<c sf")
+			for _,v := range messageArray{
+				tmp := strings.Split(v, " ")[0]
+				tmp = strings.Replace(tmp,"\"","",-1)
+				tmp = strings.Replace(tmp,"=","",-1)
+				returnResponse +=tmp+"|ZM|"
+			}
+		}
+		returnResponse = strings.Replace(returnResponse,"<soap:Envelope","",-1)
+		return more+"|ZM|"+returnResponse, 0
 	case "GetAllServersRequest":
 		tmpSplit := strings.Split(response, "<server")
 
