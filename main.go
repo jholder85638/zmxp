@@ -1,19 +1,26 @@
 package main
 
 import (
+	"./modules/common"
+	"./modules/config"
+	"./modules/console-menu"
+	"./modules/screenshot"
+	"./modules/ssh"
+	"./modules/zimbra/soap"
 	"bufio"
 	"fmt"
 	"github.com/gookit/color"
 	"github.com/integrii/flaggy"
+	"github.com/sirupsen/logrus"
+	"gopkg.in/ini.v1"
+
 	concur "github.com/korovkin/limiter"
 	"github.com/olekukonko/tablewriter"
 	cmap "github.com/orcaman/concurrent-map"
-	"github.com/sirupsen/logrus"
 	"github.com/tcnksm/go-input"
-	"gopkg.in/ini.v1"
+
 	"os"
 	"regexp"
-	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -21,31 +28,9 @@ import (
 	"time"
 )
 
-const version = "0.3a"
+const VERSION = ".4a"
+var ConfigLoaded = false
 
-type ConnectionServerConfig struct {
-	mailboxServers       string
-	ldapServers          []string
-	serverTypePreference string
-	adminUsername        string
-	adminPassword        string
-	adminPort            string
-	adminProtocol        string
-	socksServerString    string
-	adminAuthToken       string
-	allServers           cmap.ConcurrentMap
-	skipSSLChecks        bool
-	useSocks5Proxy       bool
-	printedSSLSkipNotice bool
-}
-
-type RuntimeConfig struct {
-}
-
-type DataTracker struct {
-}
-
-var log = logrus.New()
 var problemAccounts = cmap.New()
 var userServerMapping = cmap.New()
 var serverTracker = cmap.New()
@@ -76,9 +61,10 @@ var saveToConfig bool
 var socks5 bool
 var SkipSSL bool
 var sshKeyPath string
-
+var Log logrus.Logger
 func init() {
-
+	logTimestamp = strconv.FormatInt(time.Now().Unix(), 10)
+	config.LoadConfig(ConfigLoaded, VERSION)
 	flaggy.SetName("Zimbra Experience (zmxp)")
 	flaggy.SetDescription("A utility to gather information about the quality of the end user Zimbra Experience.")
 	flaggy.DefaultParser.ShowHelpOnUnexpected = true
@@ -93,27 +79,19 @@ func init() {
 	flaggy.String(&auditValue, "av", "audit-value", "When 'mail-audit' is specified as the task, this is the audit value.")
 	flaggy.String(&messageScanLimit, "sl", "scan-limit", "When 'mail-audit' is specified as the task, this is the maximum amount of messages which will be scanned per account.")
 	flaggy.String(&sshKeyPath, "key", "ssh-key", "When using SSH, you must provide an SSH key.")
-	flaggy.SetVersion("zmxp " + version)
+	flaggy.SetVersion("zmxp " + common.Version)
 	flaggy.Parse()
 }
 
 func main() {
-
-	logTimestamp = strconv.FormatInt(time.Now().Unix(), 10)
-
+	common.InitStartup()
+	console_menu.BuildMenu()
 	concurrency := 5
 	wg.Add(concurrency)
-	log.Out = os.Stdout
-	log.Formatter = &logrus.TextFormatter{
-		FullTimestamp:   true,
-		TimestampFormat: "02-01-2006 15:04:05",
-	}
+
 	knownTasks := []string{"mail-audit", "screenshot"}
 	knownAuditTypes := []string{"SearchByDate"}
-	log.Info("ZMXP " + version + ": starting up.")
-	if runtime.GOOS == "windows" {
-		fmt.Println("Hello from Windows")
-	}
+	Log.Info("ZMXP " + common.Version + ": starting up.")
 	taskSpecified := false
 	auditSpecified := false
 	taskStringBuilder := ""
@@ -126,15 +104,15 @@ func main() {
 		if n, err := strconv.Atoi(threads); err == nil {
 			maxThreads = n
 			if maxThreads > 20 {
-				log.Fatal("You are insane. No.")
+				Log.Fatal("You are insane. No.")
 			}
 		} else {
-			log.Fatal(threads + " is not a valid thread count.")
+			Log.Fatal(threads + " is not a valid thread count.")
 		}
 	}
-	log.Info("zmX will be using " + threads + " threads.")
+	Log.Info("zmX will be using " + threads + " threads.")
 	if task == "" {
-		log.Fatal("No Task was given.")
+		Log.Fatal("No Task was given.")
 	} else {
 		for _, v := range knownTasks {
 			if strings.ToLower(task) == v {
@@ -146,7 +124,7 @@ func main() {
 
 	if !taskSpecified {
 		taskStringBuilder = strings.TrimRight(taskStringBuilder, ", ")
-		log.Fatal("An unknown task was specified. The available tasks are: " + taskStringBuilder)
+		Log.Fatal("An unknown task was specified. The available tasks are: " + taskStringBuilder)
 	} else {
 		if task == "mail-audit" {
 			for _, v := range knownAuditTypes {
@@ -157,10 +135,10 @@ func main() {
 			}
 			if !auditSpecified {
 				auditStringBuilder = strings.TrimRight(auditStringBuilder, ", ")
-				log.Fatal("An unknown audit type was specified. The available types are: " + auditStringBuilder)
+				Log.Fatal("An unknown audit type was specified. The available types are: " + auditStringBuilder)
 			} else {
 				if auditValue == "" {
-					log.Fatal("When using a mail-audit, you must also specify an '--audit-value=[something]'. Example: '--audit-value=before:10/10/2019'")
+					Log.Fatal("When using a mail-audit, you must also specify an '--audit-value=[something]'. Example: '--audit-value=before:10/10/2019'")
 				}
 			}
 			if messageScanLimit == "" {
@@ -173,23 +151,23 @@ func main() {
 			Reader: os.Stdin,
 		}
 
-		ConnectionSettings := ConnectionServerConfig{}
-		ConnectionSettings.adminAuthToken = "NONE"
-		ConnectionSettings.printedSSLSkipNotice = false
+		ConnectionSettings := common.ConnectionServerConfig{}
+		ConnectionSettings.AdminAuthToken = "NONE"
+		ConnectionSettings.PrintedSSLSkipNotice = false
 		if inputFile != "" {
-			if fileExists(inputFile) {
-				log.Info("Using the input file: " + inputFile)
+			if common.FileExists(inputFile) {
+				Log.Info("Using the input file: " + inputFile)
 			} else {
-				log.Fatal("Cannot find the file: " + inputFile + ". If the file path is not specified, then it is relevant to the current working directory.")
+				Log.Fatal("Cannot find the file: " + inputFile + ". If the file path is not specified, then it is relevant to the current working directory.")
 			}
 		} else {
-			log.Warn("An input file was not specified with --file=(filename). You will be prompted for an account to test.")
+			Log.Warn("An input file was not specified with --file=(filename). You will be prompted for an account to test.")
 			mode = "input"
 		}
 
-		log.Warn("Configuration file is not present. Creating a default config...")
-		createDefaultIniFile()
-		log.Warn("You will be prompted for details.")
+		Log.Warn("Configuration file is not present. Creating a default config...")
+		//config.CreateDefaultIniFile()
+		Log.Warn("You will be prompted for details.")
 		query := "Would you like to save your responses to the configuration file? (Passwords are not saved)."
 		saveToConfigAnswer, err := ui.Ask(query, &input.Options{
 			Default:   "No",
@@ -198,26 +176,26 @@ func main() {
 			HideOrder: true,
 		})
 		if err != nil {
-			log.Fatal(err.Error())
+			Log.Fatal(err.Error())
 		}
 
 		saveToConfigAnswer = strings.ToLower(saveToConfigAnswer)
 		switch saveToConfigAnswer {
 		case "y":
 			saveToConfig = true
-			log.Info("Will save your answers to zmxp.ini")
+			Log.Info("Will save your answers to zmxp.ini")
 			break
 		case "yes":
 			saveToConfig = true
-			log.Info("Will save your answers to zmxp.ini")
+			Log.Info("Will save your answers to zmxp.ini")
 			break
 		case "n":
 			saveToConfig = false
-			log.Info("Will not save your answers to zmxp.ini")
+			Log.Info("Will not save your answers to zmxp.ini")
 			break
 		case "no":
 			saveToConfig = false
-			log.Info("Will nosave your answers to zmxp.ini")
+			Log.Info("Will nosave your answers to zmxp.ini")
 			break
 		}
 
@@ -238,15 +216,15 @@ func main() {
 				HideOrder: true,
 			})
 			if err != nil {
-				log.Fatal(err.Error())
+				Log.Fatal(err.Error())
 			}
 			adminUsername = name
 			if saveToConfig {
-				writeAnswerToFile(cfg, "zmxp.ini", "ZCS Admin Settings", "AdminUsername", adminUsername)
+				//writeAnswerToFile(cfg, "zmxp.ini", "ZCS Admin Settings", "AdminUsername", adminUsername)
 			}
 		}
 
-		ConnectionSettings.adminUsername = adminUsername
+		ConnectionSettings.AdminUsername = adminUsername
 		if password == "" {
 			query := "Enter the password for " + adminUsername
 			pw, err := ui.Ask(query, &input.Options{
@@ -257,12 +235,12 @@ func main() {
 				Mask:      true,
 			})
 			if err != nil {
-				log.Fatal(err.Error())
+				Log.Fatal(err.Error())
 			}
-			ConnectionSettings.adminPassword = pw
+			ConnectionSettings.AdminPassword = pw
 		} else {
-			log.Warn("Password has been set via the command line... (This is NOT recommended.)")
-			ConnectionSettings.adminPassword = password
+			Log.Warn("Password has been set via the command line... (This is NOT recommended.)")
+			ConnectionSettings.AdminPassword = password
 		}
 
 		AuthMailboxServer := cfg.Section("ZCS Admin Settings").Key("AuthMailboxServer").String()
@@ -278,50 +256,50 @@ func main() {
 				HideOrder: true,
 			})
 			if err != nil {
-				log.Fatal(err.Error())
+				Log.Fatal(err.Error())
 			}
 			AuthMailboxServer = name
 			if saveToConfig {
-				writeAnswerToFile(cfg, "zmxp.ini", "ZCS Admin Settings", "AuthMailboxServer", AuthMailboxServer)
+				//config.WriteAnswerToFile(cfg, "zmxp.ini", "ZCS Admin Settings", "AuthMailboxServer", AuthMailboxServer)
 			}
 
 		}
 
-		ConnectionSettings.mailboxServers = AuthMailboxServer
+		ConnectionSettings.MailboxServers = AuthMailboxServer
 
 		AuthProtocol := cfg.Section("ZCS Admin Settings").Key("AuthProtocol").String()
 		if AuthProtocol == "" {
-			log.Info("The AuthProtocol used for authentication in the config file is blank. Using https")
+			Log.Info("The AuthProtocol used for authentication in the config file is blank. Using https")
 			AuthProtocol = "https"
 			if saveToConfig {
-				writeAnswerToFile(cfg, "zmxp.ini", "ZCS Admin Settings", "AuthProtocol", AuthProtocol)
+				//config.WriteAnswerToFile(cfg, "zmxp.ini", "ZCS Admin Settings", "AuthProtocol", AuthProtocol)
 			}
 		} else {
-			log.Info("Using AuthProtocol: " + AuthProtocol + " from the config.")
+			Log.Info("Using AuthProtocol: " + AuthProtocol + " from the config.")
 		}
-		ConnectionSettings.adminProtocol = AuthProtocol
+		ConnectionSettings.AdminProtocol = AuthProtocol
 
 		AuthAdminPort := cfg.Section("ZCS Admin Settings").Key("AuthAdminPort").String()
 		if AuthAdminPort == "" {
-			log.Info("The AuthAdminPort used for authentication in the config file is blank. Using https")
+			Log.Info("The AuthAdminPort used for authentication in the config file is blank. Using https")
 			AuthAdminPort = "7071"
 			if saveToConfig {
-				writeAnswerToFile(cfg, "zmxp.ini", "ZCS Admin Settings", "AuthAdminPort", AuthAdminPort)
+				//config.WriteAnswerToFile(cfg, "zmxp.ini", "ZCS Admin Settings", "AuthAdminPort", AuthAdminPort)
 			}
 		} else {
-			log.Info("Using AuthAdminPort: " + AuthAdminPort + " from the config.")
+			Log.Info("Using AuthAdminPort: " + AuthAdminPort + " from the config.")
 		}
-		ConnectionSettings.adminPort = AuthAdminPort
+		ConnectionSettings.AdminPort = AuthAdminPort
 
 		UseSocks5Proxy := cfg.Section("Connection").Key("UseSocksProxy").String()
 		if UseSocks5Proxy == "" {
-			log.Info("The UseSocks5Proxy used for connection in the config file is blank. Setting to false.")
+			Log.Info("The UseSocks5Proxy used for connection in the config file is blank. Setting to false.")
 			UseSocks5Proxy = "false"
 			if saveToConfig {
-				writeAnswerToFile(cfg, "zmxp.ini", "Connection", "UseSocks5Proxy", UseSocks5Proxy)
+				//config.WriteAnswerToFile(cfg, "zmxp.ini", "Connection", "UseSocks5Proxy", UseSocks5Proxy)
 			}
 		} else {
-			log.Info("Using UseSocks5Proxy: " + UseSocks5Proxy + " from the config.")
+			Log.Info("Using UseSocks5Proxy: " + UseSocks5Proxy + " from the config.")
 		}
 		switch UseSocks5Proxy {
 		case "true":
@@ -332,12 +310,12 @@ func main() {
 			break
 		}
 
-		ConnectionSettings.useSocks5Proxy = socks5
+		ConnectionSettings.UseSocks5Proxy = socks5
 
 		if socks5 == true {
 			Socks5URL := cfg.Section("Connection").Key("Socks5URL").String()
 			if Socks5URL == "" {
-				log.Info("The Socks5URL used for authentication in the config file is blank.")
+				Log.Info("The Socks5URL used for authentication in the config file is blank.")
 				query := "Please enter the socks5 URL (ip/hostname:port)"
 				socks5urlString, err := ui.Ask(query, &input.Options{
 					Default:   "",
@@ -346,27 +324,27 @@ func main() {
 					HideOrder: true,
 				})
 				if err != nil {
-					log.Fatal(err.Error())
+					Log.Fatal(err.Error())
 				}
 				Socks5URL = socks5urlString
 				if saveToConfig {
-					writeAnswerToFile(cfg, "zmxp.ini", "Connection", "Socks5URL", Socks5URL)
+					//writeAnswerToFile(cfg, "zmxp.ini", "Connection", "Socks5URL", Socks5URL)
 				}
 			} else {
-				log.Info("Using Socks5URL: " + Socks5URL + " from the config.")
+				Log.Info("Using Socks5URL: " + Socks5URL + " from the config.")
 			}
-			ConnectionSettings.socksServerString = Socks5URL
+			ConnectionSettings.SocksServerString = Socks5URL
 		}
 
 		SkipSSLChecks := cfg.Section("Connection").Key("SkipSSLChecks").String()
 		if SkipSSLChecks == "" {
-			log.Info("The SkipSSLChecks used for authentication in the config file is blank. Setting to false")
+			Log.Info("The SkipSSLChecks used for authentication in the config file is blank. Setting to false")
 			SkipSSLChecks = "false"
 			if saveToConfig {
-				writeAnswerToFile(cfg, "zmxp.ini", "Connection", "SkipSSLChecks", SkipSSLChecks)
+				//config.WriteAnswerToFile(cfg, "zmxp.ini", "Connection", "SkipSSLChecks", SkipSSLChecks)
 			}
 		} else {
-			log.Info("Using SkipSSLChecks: " + SkipSSLChecks + " from the config.")
+			Log.Info("Using SkipSSLChecks: " + SkipSSLChecks + " from the config.")
 		}
 
 		switch SkipSSLChecks {
@@ -377,11 +355,11 @@ func main() {
 			SkipSSL = false
 			break
 		}
-		ConnectionSettings.skipSSLChecks = SkipSSL
-		if ConnectionSettings.skipSSLChecks == true {
-			if ConnectionSettings.printedSSLSkipNotice == false {
-				log.Warn("Skipping SSL Verification. (this will only be printed once).")
-				ConnectionSettings.printedSSLSkipNotice = true
+		ConnectionSettings.SkipSSLChecks = SkipSSL
+		if ConnectionSettings.SkipSSLChecks == true {
+			if ConnectionSettings.PrintedSSLSkipNotice == false {
+				Log.Warn("Skipping SSL Verification. (this will only be printed once).")
+				ConnectionSettings.PrintedSSLSkipNotice = true
 			}
 		}
 
@@ -389,12 +367,12 @@ func main() {
 		case "file":
 			serverTable := tablewriter.NewWriter(os.Stdout)
 			table := tablewriter.NewWriter(os.Stdout)
-			log.Info("Parsing input file....")
+			Log.Info("Parsing input file....")
 			re := regexp.MustCompile("^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$")
 
 			file, err := os.Open(inputFile)
 			if err != nil {
-				log.Fatal(err)
+				Log.Fatal(err)
 			}
 			defer file.Close()
 
@@ -404,7 +382,7 @@ func main() {
 					text := strings.ToLower(strings.Replace(scanner.Text(), " ", "", -1))
 					accountsToTest = append(accountsToTest, text)
 					domain := strings.Split(text, "@")[1]
-					if !contains(domains, domain) {
+					if !common.Contains(domains, domain) {
 						domains = append(domains, domain)
 					}
 
@@ -416,7 +394,7 @@ func main() {
 				}
 			}
 			if len(accountsToTest) == 0 {
-				log.Fatal("The file did not contain any valid accounts to test. Cannot continue.")
+				Log.Fatal("The file did not contain any valid accounts to test. Cannot continue.")
 			} else {
 				valid := strconv.Itoa(len(accountsToTest))
 				invalid := strconv.Itoa(len(accountsToSkip))
@@ -442,15 +420,15 @@ func main() {
 				summary := "There are " + valid + " " + accountsPlurality + " to test over " + domains + " " + domainPlurality + ". "
 				summary += "Skipping " + invalid + " " + linePlurality + " (invalid email " + skipPlurality + "). Use --debug=true to see details."
 				//bar := uiprogress.AddBar(len(accountsToTest))
-				log.Info(summary)
+				Log.Info(summary)
 			}
 
 			if err := scanner.Err(); err != nil {
-				log.Fatal(err)
+				Log.Fatal(err)
 			}
 			if task == "screenshot" {
 				for _, v := range accountsToTest {
-					takeScreenshot(ConnectionSettings, v)
+					screenshot.TakeScreenshot(ConnectionSettings, v)
 				}
 			} else if task == "mail-audit" {
 				limit := concur.NewConcurrencyLimiter(maxThreads)
@@ -466,7 +444,7 @@ func main() {
 				table.SetHeader([]string{"Email", "Server", "Error Message"})
 				renewToken := true
 
-				log.Error("The following accounts were identified as having issues. Please investigate...")
+				Log.Error("The following accounts were identified as having issues. Please investigate...")
 				keys := problemAccounts.Keys()
 
 				for _, v := range keys {
@@ -486,10 +464,10 @@ func main() {
 						server, _ = userServerMapping.Get(v)
 					} else {
 						if renewToken == true {
-							ConnectionSettings.adminAuthToken = getLoginToken("admin", ConnectionSettings)
+							ConnectionSettings.AdminAuthToken = soap.GetLoginToken("admin", ConnectionSettings)
 							renewToken = false
 						}
-						infoRequest := GetInfoRequest(ConnectionSettings, v, "host")
+						infoRequest := soap.GetInfoRequest(ConnectionSettings, v, "host")
 						if strings.Contains(infoRequest, "ZMERROR") {
 							errorMessage = strings.Split(infoRequest, "||ZMERROR||")[1]
 							errorMessage = strings.Split(errorMessage, ": ")[0]
@@ -527,7 +505,7 @@ func main() {
 				limit = concur.NewConcurrencyLimiter(maxThreads)
 				for i := 0; i < len(keys); i++ {
 					thisKey := serverTracker.Keys()[i]
-					log.Info("Connecting to: " + thisKey + " (" + strconv.Itoa(i+1) + " of " + strconv.Itoa(len(keys)) + ")")
+					Log.Info("Connecting to: " + thisKey + " (" + strconv.Itoa(i+1) + " of " + strconv.Itoa(len(keys)) + ")")
 					value, err := serverTracker.Get(thisKey)
 					if err != false {
 						limit.Execute(func() {
@@ -551,11 +529,11 @@ func main() {
 				HideOrder: true,
 			})
 			if err != nil {
-				log.Fatal(err.Error())
+				Log.Fatal(err.Error())
 			}
 			email = thisUsername
 			if task == "screenshot" {
-				takeScreenshot(ConnectionSettings, email)
+				screenshot.TakeScreenshot(ConnectionSettings, email)
 			} else if task == "mail-audit" {
 				//runWorker(count, totalTasks/concurrency,ConnectionSettings, email)
 				//
@@ -575,7 +553,7 @@ func main() {
 
 func GetServerIntel(server string, username string, useSocks5 bool, commands string, serverTable *tablewriter.Table, value int, slot int) {
 	debug.SetGCPercent(-1)
-	serverData := ExecuteSSHCommand(server, username, useSocks5, commands, sshKeyPath)
+	serverData := ssh.ExecuteSSHCommand(server, username, useSocks5, commands, sshKeyPath)
 	serverDataArray := strings.Split(serverData, "ZMDELIM")
 	ut := serverDataArray[0]
 	var version string
@@ -638,13 +616,13 @@ func GetServerIntel(server string, username string, useSocks5 bool, commands str
 	} else {
 		serverTable.Append([]string{server, strconv.Itoa(value), version, installedDate, loadAverage, uptime, "N/A"})
 	}
-	log.Info("Server: " + server + " (Thread: " + strconv.Itoa(slot) + ") has completed.")
+	Log.Info("Server: " + server + " (Thread: " + strconv.Itoa(slot) + ") has completed.")
 }
 
-func auditAccount(ConnectionSettings ConnectionServerConfig, email string, auditType string, auditValue string) {
+func auditAccount(ConnectionSettings common.ConnectionServerConfig, email string, auditType string, auditValue string) {
 	for _, v := range alreadySeen {
 		if v == email {
-			log.Warn("Skipping already seen user: " + email)
+			Log.Warn("Skipping already seen user: " + email)
 			return
 		}
 	}
@@ -652,24 +630,24 @@ func auditAccount(ConnectionSettings ConnectionServerConfig, email string, audit
 	f, err := os.OpenFile("zmx-mail-audit-"+logTimestamp+".log",
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Println(err)
+		Log.Println(err)
 	}
 	defer f.Close()
 	if !auditHeaderWritten {
 		if _, err := f.WriteString("Email,Host,Earliest Message Seen,Total Messages Seen,Messages Received after outage,Messages Before Outage\n"); err != nil {
-			log.Println(err)
+			Log.Println(err)
 		}
 		auditHeaderWritten = true
 	}
-	log.Info("[" + email + "-audit] Getting Messages.")
+	Log.Info("[" + email + "-audit] Getting Messages.")
 	initialOffset := 0
 	shouldContinue := false
-	if ConnectionSettings.adminAuthToken == "NONE" {
-		ConnectionSettings.adminAuthToken = getLoginToken("admin", ConnectionSettings)
+	if ConnectionSettings.AdminAuthToken == "NONE" {
+		ConnectionSettings.AdminAuthToken = soap.GetLoginToken("admin", ConnectionSettings)
 	}
 
-	response := SearchDateRequest(ConnectionSettings, email, auditValue, strconv.Itoa(initialOffset))
-	infoRequest := GetInfoRequest(ConnectionSettings, email, "host")
+	response := soap.SearchDateRequest(ConnectionSettings, email, auditValue, strconv.Itoa(initialOffset))
+	infoRequest := soap.GetInfoRequest(ConnectionSettings, email, "host")
 	host := strings.Split(infoRequest, ":")[1]
 	host = strings.Replace(host, "//", "", -1)
 	if !strings.Contains(response, "|ZM|") {
@@ -682,11 +660,11 @@ func auditAccount(ConnectionSettings ConnectionServerConfig, email string, audit
 		}
 
 		if strings.Contains(stringCheck, "no_such") {
-			go LogError(email, host, "no-such-"+logTimestamp+".log")
+			go common.LogError(email, host, "no-such-"+logTimestamp+".log")
 		} else {
 			response = strings.Split(response, ":")[0]
 			if _, err := f.WriteString(email + "," + host + ",ERROR " + response + "\n"); err != nil {
-				log.Println(err)
+				Log.Println(err)
 			}
 
 		}
@@ -702,11 +680,11 @@ func auditAccount(ConnectionSettings ConnectionServerConfig, email string, audit
 	var earliestSeen time.Time
 	earliestSeenSet := false
 	dateMap := make(map[string]int)
-	log.Info("[" + email + "] Parsing message dates.")
+	Log.Info("[" + email + "] Parsing message dates.")
 
 	for _, v := range data {
 
-		dateTime, err := msToTime(v)
+		dateTime, err := common.MsToTime(v)
 
 		if err != nil {
 
@@ -746,8 +724,8 @@ func auditAccount(ConnectionSettings ConnectionServerConfig, email string, audit
 			} else {
 				initialOffset += 1000
 				currenStatusString := 1000 + initialOffset
-				log.Info("[" + email + "] Getting more mail (" + strconv.Itoa(currenStatusString) + " messages so far...)")
-				response := SearchDateRequest(ConnectionSettings, email, auditValue, strconv.Itoa(initialOffset))
+				Log.Info("[" + email + "] Getting more mail (" + strconv.Itoa(currenStatusString) + " messages so far...)")
+				response := soap.SearchDateRequest(ConnectionSettings, email, auditValue, strconv.Itoa(initialOffset))
 
 				data := strings.Split(response, "|ZM|")
 
@@ -758,7 +736,7 @@ func auditAccount(ConnectionSettings ConnectionServerConfig, email string, audit
 					shouldContinue = false
 				}
 				for _, v := range data {
-					dateTime, err := msToTime(v)
+					dateTime, err := common.MsToTime(v)
 					if err != nil {
 
 					} else {
@@ -797,8 +775,8 @@ func auditAccount(ConnectionSettings ConnectionServerConfig, email string, audit
 	}
 
 	if _, err := f.WriteString(email + "," + host + "," + earliestSeen.String() + "," + strconv.Itoa(totalCounter) + "," + strconv.Itoa(afterOutage) + "," + strconv.Itoa(beforeOutage) + "\n"); err != nil {
-		log.Println(err)
+		Log.Println(err)
 	}
-	log.Info("[" + email + "] Taking screenshot of inbox...")
-	go takeScreenshot(ConnectionSettings, email)
+	Log.Info("[" + email + "] Taking screenshot of inbox...")
+	go screenshot.TakeScreenshot(ConnectionSettings, email)
 }
